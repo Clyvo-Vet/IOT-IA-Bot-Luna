@@ -1,0 +1,303 @@
+[
+  {
+    "id": "flow_kura_iot",
+    "type": "tab",
+    "label": "KURA — Câmara Fria IoT",
+    "disabled": false,
+    "info": "Pipeline: ESP32 → MQTT → Funde com OpenWeather → MySQL (LEITURA_TEMPERATURA + ALERTA_TEMPERATURA) → Dashboard"
+  },
+  {
+    "id": "mqtt_broker_kura",
+    "type": "mqtt-broker",
+    "name": "HiveMQ (KURA)",
+    "broker": "broker.hivemq.com",
+    "port": "1883",
+    "clientid": "nodered_kura_server",
+    "autoConnect": true,
+    "usetls": false,
+    "protocolVersion": "4",
+    "keepalive": "60",
+    "cleansession": true
+  },
+  {
+    "id": "mysql_kura",
+    "type": "MySQLdatabase",
+    "name": "kura_db",
+    "host": "127.0.0.1",
+    "port": "3306",
+    "db": "kura_db",
+    "tz": "America/Sao_Paulo"
+  },
+
+  {
+    "id": "mqtt_in",
+    "type": "mqtt in",
+    "z": "flow_kura_iot",
+    "name": "📡 ESP32 Telemetria",
+    "topic": "kura/clinica01/camarafria/telemetria",
+    "qos": "1",
+    "datatype": "json",
+    "broker": "mqtt_broker_kura",
+    "x": 120,
+    "y": 80,
+    "wires": [["store_esp32_payload"]]
+  },
+
+  {
+    "id": "store_esp32_payload",
+    "type": "function",
+    "z": "flow_kura_iot",
+    "name": "Guarda payload ESP32",
+    "func": "// Salva o payload do ESP32 no contexto do fluxo\n// para ser combinado com o clima no próximo passo\nflow.set('esp32_payload', msg.payload);\nreturn msg;",
+    "outputs": 1,
+    "x": 330,
+    "y": 80,
+    "wires": [["http_openweather"]]
+  },
+
+  {
+    "id": "http_openweather",
+    "type": "http request",
+    "z": "flow_kura_iot",
+    "name": "🌤️ OpenWeather API",
+    "method": "GET",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "https://api.openweathermap.org/data/2.5/weather?q=Sao+Paulo,BR&appid=SUA_CHAVE_OPENWEATHER&units=metric&lang=pt_br",
+    "x": 550,
+    "y": 80,
+    "wires": [["funde_payloads"]]
+  },
+
+  {
+    "id": "funde_payloads",
+    "type": "function",
+    "z": "flow_kura_iot",
+    "name": "Funde ESP32 + Clima",
+    "func": "// Recupera o payload do ESP32 salvo no step anterior\n// e combina com a resposta da OpenWeather\nconst esp32 = flow.get('esp32_payload');\nconst clima  = msg.payload;\n\nif (!esp32) {\n    node.warn('Payload ESP32 não encontrado no contexto. Descartando.');\n    return null;\n}\n\nmsg.payload = { esp32, clima };\nreturn msg;",
+    "outputs": 1,
+    "x": 760,
+    "y": 80,
+    "wires": [["fn_processa_telemetria"]]
+  },
+
+  {
+    "id": "fn_processa_telemetria",
+    "type": "function",
+    "z": "flow_kura_iot",
+    "name": "⚙️ Processa Telemetria + Clima",
+    "func": "// === COLE AQUI O CONTEÚDO DE function_processa_telemetria.js ===\n// (O arquivo completo está em /nodered/function_processa_telemetria.js)\n// O código está separado para facilitar versionamento no Git.\n\n// Stub resumido para o flow.json (substitua pelo conteúdo completo):\nconst esp32 = msg.payload.esp32;\nconst clima  = msg.payload.clima;\nif (!esp32) return null;\n\nconst temp        = parseFloat(esp32.temperatura);\nconst umid        = parseFloat(esp32.umidade);\nconst ldrADC      = parseInt(esp32.ldr_adc);\nconst portaAberta = Boolean(esp32.porta_aberta);\nconst dentroFaixa = (temp >= 2.0 && temp <= 8.0);\nconst stFaixa     = dentroFaixa ? 'S' : 'N';\n\nlet obs = null;\nif (portaAberta) obs = `ALERTA: Porta Aberta | LDR_ADC=${ldrADC}`;\nif (!dentroFaixa) {\n    const extra = temp < 2 ? `TEMP_FORA_FAIXA: ABAIXO_MINIMO | Desvio=${(temp-2).toFixed(1)}°C`\n                           : `TEMP_FORA_FAIXA: ACIMA_MAXIMO | Desvio=${(temp-8).toFixed(1)}°C`;\n    obs = obs ? `${obs} | ${extra}` : extra;\n}\nif (obs) obs = obs.substring(0,200);\n\nconst msgLeitura = {\n    topic: 'INSERT INTO LEITURA_TEMPERATURA (ID_DISPOSITIVO,NR_TEMPERATURA,NR_UMIDADE,DT_LEITURA,ST_DENTRO_FAIXA,DS_OBSERVACAO) VALUES (?,?,?,NOW(),?,?)',\n    payload: [esp32.id_dispositivo||1, temp, isNaN(umid)?null:umid, stFaixa, obs]\n};\n\nconst flowCtx = flow.get('alertaAtivo')||{fora_faixa:false,porta_aberta:false};\nconst novoAlerta = (!dentroFaixa&&!flowCtx.fora_faixa)||(portaAberta&&!flowCtx.porta_aberta);\nflow.set('alertaAtivo',{fora_faixa:!dentroFaixa,porta_aberta:portaAberta});\n\nlet msgAlerta = null;\nif (novoAlerta) {\n    const tipo = temp > 8 ? 'TEMP_ALTA' : (temp < 2 ? 'TEMP_BAIXA' : 'TEMP_ALTA');\n    const sev  = temp > 20 || temp < -2 ? 'CRITICA' : temp > 12 || temp < 0 ? 'ALTA' : 'MEDIA';\n    msgAlerta = {\n        topic: 'INSERT INTO ALERTA_TEMPERATURA (ID_DISPOSITIVO,DS_TIPO_ALERTA,DS_SEVERIDADE,NR_TEMP_REGISTRADA,DT_INICIO,DS_MENSAGEM,ST_RESOLVIDO) VALUES (?,?,?,?,NOW(),?,\\'N\\')',\n        payload: [esp32.id_dispositivo||1, tipo, sev, temp,\n            `[KURA IoT] Temp: ${temp}°C. Faixa: 2-8°C. Porta: ${portaAberta?'ABERTA':'FECHADA'}.`.substring(0,500)]\n    };\n}\n\nconst msgDash = { payload: { temperatura:temp, umidade:umid, porta_aberta:portaAberta,\n    dentro_faixa:dentroFaixa, status: dentroFaixa&&!portaAberta?'NORMAL':'ALERTA',\n    clima: clima&&clima.main ? { temp_ext:clima.main.temp, descricao:clima.weather?.[0]?.description } : {},\n    ts: new Date().toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'}) } };\n\nreturn [msgLeitura, msgAlerta, msgDash];",
+    "outputs": 3,
+    "outputLabels": ["INSERT leitura", "INSERT alerta (condicional)", "Dashboard"],
+    "x": 990,
+    "y": 80,
+    "wires": [
+      ["mysql_leitura"],
+      ["mysql_alerta"],
+      ["gauge_temp", "gauge_umid", "chart_temp", "txt_status", "txt_clima"]
+    ]
+  },
+
+  {
+    "id": "mysql_leitura",
+    "type": "mysql",
+    "z": "flow_kura_iot",
+    "name": "DB: LEITURA_TEMPERATURA",
+    "mydb": "mysql_kura",
+    "x": 1250,
+    "y": 40,
+    "wires": [["debug_leitura"]]
+  },
+  {
+    "id": "debug_leitura",
+    "type": "debug",
+    "z": "flow_kura_iot",
+    "name": "Debug INSERT Leitura",
+    "active": true,
+    "tosidebar": true,
+    "complete": "true",
+    "x": 1480,
+    "y": 40,
+    "wires": []
+  },
+
+  {
+    "id": "mysql_alerta",
+    "type": "mysql",
+    "z": "flow_kura_iot",
+    "name": "DB: ALERTA_TEMPERATURA",
+    "mydb": "mysql_kura",
+    "x": 1250,
+    "y": 100,
+    "wires": [["debug_alerta"]]
+  },
+  {
+    "id": "debug_alerta",
+    "type": "debug",
+    "z": "flow_kura_iot",
+    "name": "Debug INSERT Alerta",
+    "active": true,
+    "tosidebar": true,
+    "complete": "true",
+    "x": 1480,
+    "y": 100,
+    "wires": []
+  },
+
+  {
+    "id": "gauge_temp",
+    "type": "ui_gauge",
+    "z": "flow_kura_iot",
+    "name": "Gauge Temperatura",
+    "group": "grp_kura_dash",
+    "order": 1,
+    "width": 4,
+    "height": 4,
+    "gtype": "gage",
+    "title": "Temperatura Câmara",
+    "label": "°C",
+    "format": "{{value}}",
+    "min": -5,
+    "max": 30,
+    "colors": ["#00b4d8", "#2dc653", "#e63946"],
+    "seg1": "2",
+    "seg2": "8",
+    "x": 1280,
+    "y": 160,
+    "wires": []
+  },
+
+  {
+    "id": "gauge_umid",
+    "type": "ui_gauge",
+    "z": "flow_kura_iot",
+    "name": "Gauge Umidade",
+    "group": "grp_kura_dash",
+    "order": 2,
+    "width": 4,
+    "height": 4,
+    "gtype": "gage",
+    "title": "Umidade Relativa",
+    "label": "%",
+    "format": "{{value}}",
+    "min": 0,
+    "max": 100,
+    "colors": ["#e63946", "#2dc653", "#00b4d8"],
+    "seg1": "40",
+    "seg2": "70",
+    "x": 1280,
+    "y": 220,
+    "wires": []
+  },
+
+  {
+    "id": "chart_temp",
+    "type": "ui_chart",
+    "z": "flow_kura_iot",
+    "name": "Chart Histórico Temperatura",
+    "group": "grp_kura_dash",
+    "order": 3,
+    "width": 12,
+    "height": 5,
+    "label": "Histórico Temperatura (°C) — Faixa ANVISA: 2 a 8°C",
+    "chartType": "line",
+    "legend": "false",
+    "xformat": "HH:mm:ss",
+    "interpolate": "linear",
+    "nodata": "Aguardando dados do sensor...",
+    "dot": true,
+    "ymin": "-5",
+    "ymax": "30",
+    "removeOlder": "1",
+    "removeOlderUnit": "3600",
+    "x": 1290,
+    "y": 280,
+    "wires": [[]]
+  },
+
+  {
+    "id": "txt_status",
+    "type": "ui_text",
+    "z": "flow_kura_iot",
+    "name": "Status Geral",
+    "group": "grp_kura_dash",
+    "order": 4,
+    "width": 6,
+    "height": 1,
+    "label": "Status",
+    "format": "{{msg.payload.status}}",
+    "x": 1270,
+    "y": 340,
+    "wires": []
+  },
+
+  {
+    "id": "txt_clima",
+    "type": "ui_text",
+    "z": "flow_kura_iot",
+    "name": "Clima Externo",
+    "group": "grp_kura_dash",
+    "order": 5,
+    "width": 6,
+    "height": 1,
+    "label": "Clima SP (OpenWeather)",
+    "format": "{{msg.payload.clima.temp_ext}}°C — {{msg.payload.clima.descricao}}",
+    "x": 1280,
+    "y": 380,
+    "wires": []
+  },
+
+  {
+    "id": "grp_kura_dash",
+    "type": "ui_group",
+    "name": "KURA — Câmara Fria de Vacinas",
+    "tab": "tab_kura",
+    "order": 1,
+    "disp": true,
+    "width": "12"
+  },
+  {
+    "id": "tab_kura",
+    "type": "ui_tab",
+    "name": "KURA IoT",
+    "icon": "fa-thermometer-half",
+    "order": 1
+  },
+
+  {
+    "id": "mqtt_status_in",
+    "type": "mqtt in",
+    "z": "flow_kura_iot",
+    "name": "📡 Status Dispositivo (LWT)",
+    "topic": "kura/clinica01/camarafria/status",
+    "qos": "1",
+    "datatype": "json",
+    "broker": "mqtt_broker_kura",
+    "x": 120,
+    "y": 260,
+    "wires": [["fn_verifica_offline"]]
+  },
+
+  {
+    "id": "fn_verifica_offline",
+    "type": "function",
+    "z": "flow_kura_iot",
+    "name": "Verifica Offline (LWT)",
+    "func": "// Quando o ESP32 cai abruptamente, o broker publica o LWT\n// com status='offline'. Geramos um alerta SENSOR_OFFLINE no banco.\nconst status = msg.payload;\nif (status && status.status === 'offline') {\n    msg.topic = 'INSERT INTO ALERTA_TEMPERATURA (ID_DISPOSITIVO,DS_TIPO_ALERTA,DS_SEVERIDADE,NR_TEMP_REGISTRADA,DT_INICIO,DS_MENSAGEM,ST_RESOLVIDO) VALUES (?,?,?,NULL,NOW(),?,\\'N\\')';\n    msg.payload = [\n        1,                   // ID_DISPOSITIVO\n        'SENSOR_OFFLINE',    // DS_TIPO_ALERTA\n        'CRITICA',           // DS_SEVERIDADE\n        '[KURA IoT] Dispositivo ESP32 câmara fria ficou OFFLINE. Verificar conexão imediatamente.'\n    ];\n    return msg;\n}\nreturn null; // online: não faz nada",
+    "outputs": 1,
+    "x": 380,
+    "y": 260,
+    "wires": [["mysql_alerta_offline"]]
+  },
+
+  {
+    "id": "mysql_alerta_offline",
+    "type": "mysql",
+    "z": "flow_kura_iot",
+    "name": "DB: Alerta SENSOR_OFFLINE",
+    "mydb": "mysql_kura",
+    "x": 620,
+    "y": 260,
+    "wires": [[]]
+  }
+]

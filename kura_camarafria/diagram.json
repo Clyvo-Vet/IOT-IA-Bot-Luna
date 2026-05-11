@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "author": "KURA IoT - Challenge FIAP 2026",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "wokwi-esp32-devkit-v1",
+      "id": "esp32",
+      "top": 80,
+      "left": 200,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-dht22",
+      "id": "dht22",
+      "top": 80,
+      "left": 0,
+      "attrs": {
+        "temperature": "5.5",
+        "humidity": "65"
+      }
+    },
+    {
+      "type": "wokwi-photoresistor-sensor",
+      "id": "ldr",
+      "top": 280,
+      "left": 0,
+      "attrs": {
+        "lux": "0"
+      }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r1",
+      "top": 300,
+      "left": 140,
+      "attrs": {
+        "value": "10000"
+      },
+      "rotate": 90
+    }
+  ],
+  "connections": [
+    ["dht22:VCC",  "esp32:3V3",     "red",   ["h10", "v0"]],
+    ["dht22:GND",  "esp32:GND.1",   "black", ["h10", "v0"]],
+    ["dht22:SDA",  "esp32:D4",      "green", ["h10", "v0"]],
+
+    ["ldr:VCC",    "esp32:3V3",     "red",   ["h0", "v-20", "h180"]],
+    ["ldr:GND",    "esp32:GND.2",   "black", ["h0", "v20",  "h180"]],
+    ["ldr:AO",     "esp32:D34",     "yellow",["h0", "v0"]],
+    ["ldr:DO",     "esp32:GND.2",   "gray",  ["h0", "v0"]]
+  ],
+  "dependencies": {}
+}
